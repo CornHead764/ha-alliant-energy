@@ -11,21 +11,21 @@ _LOGGER = logging.getLogger(__name__)
 class AlliantEnergyData:
     """Class to hold the energy data."""
     def __init__(self):
-        self.usage_to_date: float = None
-        self.forecasted_usage: float = None
-        self.typical_usage: float = None
-        self.cost_to_date: float = None
-        self.forecasted_cost: float = None
-        self.typical_cost: float = None
-        self.start_date: datetime = None
-        self.end_date: datetime = None
-        self.last_api_update: datetime = None
-        self.last_meter_read: datetime = None
-        self.cost_per_kwh: float = None
+        self.usage_to_date: float | None = None
+        self.forecasted_usage: float | None = None
+        self.typical_usage: float | None = None
+        self.cost_to_date: float | None = None
+        self.forecasted_cost: float | None = None
+        self.typical_cost: float | None = None
+        self.start_date: datetime | None = None
+        self.end_date: datetime | None = None
+        self.last_api_update: datetime | None = None
+        self.last_meter_read: datetime | None = None
+        self.cost_per_kwh: float | None = None
         self.customer_charge: float = 0.4932  # Daily customer charge
         self.is_cost_estimated: bool = False
 
-    def calculate_cost(self, kwh: float, days: float) -> float:
+    def calculate_cost(self, kwh: float, days: float) -> float | None:
         """Calculate cost including customer charge."""
         if self.cost_per_kwh is None or kwh is None or days is None:
             return None
@@ -58,19 +58,20 @@ class AlliantEnergyClient:
         return {
             "accept": "application/json, text/plain, */*",
             "accept-language": "en-US,en;q=0.9",
-            "dnt": "1",
             "origin": "https://myaccount.alliantenergy.com",
             "priority": "u=1, i",
             "pt": "1",
             "referer": "https://myaccount.alliantenergy.com/",
-            "sec-ch-ua": '"Not?A_Brand";v="99", "Chromium";v="130"',
+            "sec-ch-ua": '"Google Chrome";v="143", "Chromium";v="143", "Not A(Brand";v="24"',
             "sec-ch-ua-mobile": "?0",
-            "sec-ch-ua-platform": '"macOS"',
+            "sec-ch-ua-platform": '"Linux"',
             "sec-fetch-dest": "empty",
             "sec-fetch-mode": "cors",
             "sec-fetch-site": "cross-site",
+            "st": 'PL',
             "uid": "2",
-            "user-agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36"
+            "user-agent": "Mozilla/9.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36",
+            "Accept-Encoding": "gzip"
         }
 
     async def _load_cached_auth(self) -> bool:
@@ -127,11 +128,11 @@ class AlliantEnergyClient:
             "customattributes": {
                 "ip": "",
                 "client": "Web",
-                "version": "10_15_7",
-                "deviceId": "||Chrome||130||Mac OS X||10_15_7||",
+                "version": "-",
+                "deviceId": "||Chrome||143||Linux||-||",
                 "deviceName": "Chrome",
                 "deviceType": 0,
-                "os": "Mac OS X"
+                "os": "Linux"
             }
         }
 
@@ -218,7 +219,11 @@ class AlliantEnergyClient:
             if not data["data"]:
                 raise AlliantEnergyAuthError("No meter found")
 
-            self._meter_number = data["data"][0]["meterNumber"]
+            meter = next((meter for meter in data["data"] if meter['deviceAttribute5'] == 'ERES'), None)
+            if not meter:
+                raise AlliantEnergyAuthError("No meter found")
+
+            self._meter_number = meter["meterNumber"]
 
     async def async_get_data(self) -> AlliantEnergyData:
         """Get the energy data."""
