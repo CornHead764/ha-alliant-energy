@@ -123,14 +123,15 @@ class ConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         config_entry: ConfigEntry,
     ) -> "OptionsFlowHandler":
         """Get the options flow for changing the selected meters."""
-        return OptionsFlowHandler(config_entry)
+        return OptionsFlowHandler()
 
 
 class OptionsFlowHandler(config_entries.OptionsFlow):
-    """Handle changing which meters are imported after setup."""
+    """Handle changing which meters are imported after setup.
 
-    def __init__(self, config_entry: ConfigEntry) -> None:
-        self.config_entry = config_entry
+    ``self.config_entry`` is provided by Home Assistant; modern HA exposes
+    it as a read-only property, so it must not be set in ``__init__``.
+    """
 
     async def async_step_init(
         self, user_input: dict[str, Any] | None = None

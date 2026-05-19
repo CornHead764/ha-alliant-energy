@@ -90,9 +90,10 @@ ELEC_SENSORS = (
         value_fn=lambda data: data.typical_cost,
     ),
     AlliantEntityDescription(
+        # No device_class: MONETARY forbids the MEASUREMENT state class in
+        # current HA, and this is a rate ($/kWh), not a monetary balance.
         key="elec_cost_per_kwh",
         name="Electric Cost per kWh",
-        device_class=SensorDeviceClass.MONETARY,
         native_unit_of_measurement="USD/kWh",
         state_class=SensorStateClass.MEASUREMENT,
         suggested_display_precision=4,
