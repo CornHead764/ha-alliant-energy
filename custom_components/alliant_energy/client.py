@@ -13,6 +13,16 @@ _LOGGER = logging.getLogger(__name__)
 # /UsageAPI/.../Electric endpoints this integration consumes.
 ELECTRIC_SERVICE_TYPE = "ERES"
 
+
+def _safe_float(value) -> float | None:
+    """Parse a value to float, returning None instead of raising."""
+    if value is None:
+        return None
+    try:
+        return float(value)
+    except (TypeError, ValueError):
+        return None
+
 class AlliantEnergyData:
     """Class to hold the energy data."""
     def __init__(self):
@@ -29,6 +39,20 @@ class AlliantEnergyData:
         self.cost_per_kwh: float | None = None
         self.customer_charge: float = 0.4932  # Daily customer charge
         self.is_cost_estimated: bool = False
+        # Actual billed amount of the most recent completed period, used as a
+        # real fallback when no projection exists and a net-export month would
+        # otherwise produce a misleading negative estimate.
+        self.last_actual_cost: float | None = None
+        # Actual net usage (kWh) of that same completed period.
+        self.last_actual_usage: float | None = None
+        # Peak month so far this year, from the projected endpoint.
+        self.highest_usage_this_year: float | None = None
+        self.highest_cost_this_year: float | None = None
+        # Average daily net usage (negative when net-exporting).
+        self.avg_daily_usage: float | None = None
+        # Billing-cycle progress derived from start/end dates.
+        self.days_into_period: int | None = None
+        self.days_remaining: int | None = None
 
     def calculate_cost(self, kwh: float, days: float) -> float | None:
         """Calculate cost including customer charge."""
@@ -384,7 +408,13 @@ class AlliantEnergyClient:
 
         async with self._session.get(historical_url, params=historical_params, headers=headers) as response:
             if response.status == 200:
-                historical = (await response.json())["Result"]["electricUsages"]
+                historical_raw = await response.json()
+                _LOGGER.debug(
+                    "Historical raw for meter %s: %s",
+                    meter_number,
+                    json.dumps(historical_raw),
+                )
+                historical = historical_raw["Result"]["electricUsages"]
                 if historical:
                     # Sort by reading date for reliability
                     sorted_readings = sorted(
@@ -392,48 +422,85 @@ class AlliantEnergyClient:
                         key=lambda x: datetime.fromisoformat(x["readingFrom"].replace("Z", "+00:00"))
                     )
 
-                    # Calculate cost per kWh from most recent complete period
-                    if sorted_readings:
-                        latest_reading = sorted_readings[-1]
-                        period_start = datetime.fromisoformat(latest_reading["readingFrom"].replace("Z", "+00:00"))
-                        period_end = datetime.fromisoformat(latest_reading["readingTo"].replace("Z", "+00:00"))
+                    # Derive cost per kWh from the most recent period that has
+                    # positive net consumption. Solar/net-metering customers
+                    # routinely have net-export (negative consumption) months,
+                    # which can't yield a sensible per-kWh rate, so we walk
+                    # backwards to the latest period that actually drew power.
+                    for reading in reversed(sorted_readings):
+                        period_start = datetime.fromisoformat(reading["readingFrom"].replace("Z", "+00:00"))
+                        period_end = datetime.fromisoformat(reading["readingTo"].replace("Z", "+00:00"))
                         days_in_period = (period_end - period_start).days
-                        total_cost = float(latest_reading["amount"])
-                        total_usage = float(latest_reading["consumption"])
+                        try:
+                            total_cost = float(reading["amount"])
+                            total_usage = float(reading["consumption"])
+                        except (TypeError, ValueError):
+                            continue
+
+                        if days_in_period <= 0 or total_usage <= 0:
+                            continue
 
                         # Subtract out customer charge
                         customer_charge_total = days_in_period * data.customer_charge
                         energy_cost = total_cost - customer_charge_total
 
-                        if total_usage > 0:
-                            data.cost_per_kwh = energy_cost / total_usage
-                            _LOGGER.debug(
-                                "Calculated cost per kWh from last period: $%.4f "
-                                "(total cost: $%.2f - customer charge: $%.2f for %d days = $%.2f energy cost / %.1f kWh)",
-                                data.cost_per_kwh,
-                                total_cost,
-                                data.customer_charge,
-                                days_in_period,
-                                energy_cost,
-                                total_usage
-                            )
+                        data.cost_per_kwh = energy_cost / total_usage
+                        _LOGGER.debug(
+                            "Calculated cost per kWh from period %s-%s: $%.4f "
+                            "(total cost: $%.2f - customer charge: $%.2f for %d days = $%.2f energy cost / %.1f kWh)",
+                            period_start.date(),
+                            period_end.date(),
+                            data.cost_per_kwh,
+                            total_cost,
+                            data.customer_charge,
+                            days_in_period,
+                            energy_cost,
+                            total_usage,
+                        )
+                        break
+                    else:
+                        _LOGGER.debug(
+                            "No period with positive consumption found for "
+                            "meter %s; cost per kWh unavailable",
+                            meter_number,
+                        )
 
-                    # Calculate average period length for billing period projection
+                    # Calculate average period length for billing period
+                    # projection. Drop meter-swap stubs and partial reads
+                    # (e.g. a 0-day swap row or a 7-day partial) so a normal
+                    # ~monthly cycle isn't skewed short.
                     period_lengths = []
                     for reading in sorted_readings:
                         start = datetime.fromisoformat(reading["readingFrom"].replace("Z", "+00:00"))
                         end = datetime.fromisoformat(reading["readingTo"].replace("Z", "+00:00"))
                         period_lengths.append((end - start).days)
 
-                    avg_period_length = round(sum(period_lengths) / len(period_lengths))
+                    full_periods = [d for d in period_lengths if d >= 20]
+                    avg_period_length = round(
+                        sum(full_periods) / len(full_periods)
+                        if full_periods
+                        else sum(period_lengths) / len(period_lengths)
+                    )
 
                     # Get last completed billing period
                     last_period = sorted_readings[-1]
                     last_period_end = datetime.fromisoformat(last_period["readingTo"].replace("Z", "+00:00"))
 
+                    # Real billed amount and net usage of that period (true
+                    # numbers even in a net-export month). last_actual_cost
+                    # also feeds the cost fallback below.
+                    data.last_actual_cost = _safe_float(last_period.get("amount"))
+                    data.last_actual_usage = _safe_float(last_period.get("consumption"))
+
                     # Calculate current billing period
                     data.start_date = last_period_end.replace(tzinfo=None)
                     data.end_date = data.start_date + timedelta(days=avg_period_length)
+
+                    # Billing-cycle progress (floored at 0 so a freshly
+                    # started or overrun cycle doesn't report negatives).
+                    now = datetime.now().replace(tzinfo=None)
+                    data.days_into_period = max((now - data.start_date).days, 0)
+                    data.days_remaining = max((data.end_date - now).days, 0)
 
                     # Set last meter read
                     data.last_meter_read = datetime.fromisoformat(
@@ -457,7 +524,13 @@ class AlliantEnergyClient:
 
         async with self._session.get(projected_url, params=projected_params, headers=headers) as response:
             if response.status == 200:
-                projected = (await response.json())["Result"]["projectedElectric"]
+                projected_raw = await response.json()
+                _LOGGER.debug(
+                    "Projected raw for meter %s: %s",
+                    meter_number,
+                    json.dumps(projected_raw),
+                )
+                projected = projected_raw["Result"]["projectedElectric"]
                 try:
                     data.usage_to_date = float(projected["soFarThisMonthProjectedConsumption"])
                 except (ValueError, TypeError):
@@ -473,32 +546,62 @@ class AlliantEnergyClient:
                 except (ValueError, TypeError):
                     data.typical_usage = None
 
-                try:
-                    api_cost = float(projected["soFarThisMonthProjectedAmount"])
-                    if api_cost > 0:
-                        data.cost_to_date = api_cost
-                    elif data.cost_per_kwh and data.usage_to_date:
-                        days_so_far = (datetime.now().replace(tzinfo=None) - data.start_date).days
-                        data.cost_to_date = data.calculate_cost(data.usage_to_date, days_so_far)
+                data.highest_usage_this_year = _safe_float(
+                    projected.get("highestThisYearConsumption")
+                )
+                data.highest_cost_this_year = _safe_float(
+                    projected.get("highestThisYearAmount")
+                )
+                data.avg_daily_usage = _safe_float(
+                    projected.get("averageDailyConsumption")
+                )
+
+                # Cost resolution order, for each of cost-to-date and
+                # forecasted cost:
+                #   1. Alliant's own projected dollar amount, if it gives one
+                #   2. our estimate (rate * usage + customer charge), but only
+                #      if it's positive
+                #   3. the last actually-billed amount from history
+                # Steps 2/3 exist because Alliant returns "0" (no projection)
+                # for net-metering meters, and a net-export month makes the
+                # estimate negative, which would misrepresent the bill.
+                days_so_far = None
+                if data.start_date is not None:
+                    days_so_far = max(
+                        (datetime.now().replace(tzinfo=None) - data.start_date).days,
+                        0,
+                    )
+
+                api_cost = _safe_float(projected.get("soFarThisMonthProjectedAmount"))
+                if api_cost is not None and api_cost > 0:
+                    data.cost_to_date = api_cost
+                else:
+                    estimated = None
+                    if days_so_far is not None and data.usage_to_date is not None:
+                        estimated = data.calculate_cost(data.usage_to_date, days_so_far)
+                    if estimated is not None and estimated > 0:
+                        data.cost_to_date = estimated
                         data.is_cost_estimated = True
-                except (ValueError, TypeError):
-                    if data.cost_per_kwh and data.usage_to_date:
-                        days_so_far = (datetime.now().replace(tzinfo=None) - data.start_date).days
-                        data.cost_to_date = data.calculate_cost(data.usage_to_date, days_so_far)
+                    elif data.last_actual_cost is not None:
+                        data.cost_to_date = data.last_actual_cost
                         data.is_cost_estimated = True
 
-                try:
-                    api_cost = float(projected["projectedAmount"])
-                    if api_cost > 0:
-                        data.forecasted_cost = api_cost
-                    elif data.cost_per_kwh and data.forecasted_usage:
-                        period_days = (data.end_date - data.start_date).days
-                        data.forecasted_cost = data.calculate_cost(data.forecasted_usage, period_days)
+                period_days = None
+                if data.start_date is not None and data.end_date is not None:
+                    period_days = (data.end_date - data.start_date).days
+
+                api_cost = _safe_float(projected.get("projectedAmount"))
+                if api_cost is not None and api_cost > 0:
+                    data.forecasted_cost = api_cost
+                else:
+                    estimated = None
+                    if period_days is not None and data.forecasted_usage is not None:
+                        estimated = data.calculate_cost(data.forecasted_usage, period_days)
+                    if estimated is not None and estimated > 0:
+                        data.forecasted_cost = estimated
                         data.is_cost_estimated = True
-                except (ValueError, TypeError):
-                    if data.cost_per_kwh and data.forecasted_usage:
-                        period_days = (data.end_date - data.start_date).days
-                        data.forecasted_cost = data.calculate_cost(data.forecasted_usage, period_days)
+                    elif data.last_actual_cost is not None:
+                        data.forecasted_cost = data.last_actual_cost
                         data.is_cost_estimated = True
 
                 try:

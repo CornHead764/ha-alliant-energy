@@ -65,15 +65,30 @@ adding meters never collides with existing ones.
 | Electric Cost per kWh                  | Calculated energy rate (excluding customer charge) |
 | Current Bill Electric Start Date       | Start date of current billing period               |
 | Current Bill Electric End Date         | End date of current billing period                 |
+| Last Bill Electric Cost                | Actual billed cost of the last completed period    |
+| Last Bill Electric Usage               | Actual net usage of the last completed period      |
+| Highest Monthly Electric Usage This Year | Peak month's usage so far this year              |
+| Highest Monthly Electric Cost This Year  | Peak month's cost so far this year               |
+| Average Daily Electric Usage           | Average daily net usage (negative if net-exporting) |
+| Current Bill Days Elapsed              | Days elapsed in the current billing period         |
+| Current Bill Days Remaining            | Days remaining in the current billing period       |
 
 ## Cost Calculation Details
 
 The integration calculates costs using:
 
-- Energy rate (per kWh) derived from previous billing period
+- Energy rate (per kWh) derived from the most recent billing period that had
+  positive net consumption (solar net-export months are skipped)
 - Daily customer charge of $0.4932
 - Actual Alliant Energy data when available
 - Estimated costs when Alliant data isn't available
+
+Cost-to-date and forecasted cost resolve in this order: Alliant's own
+projected dollar amount → an internal estimate (only when positive) → the
+last actually-billed amount from history. This avoids misleading negative
+"costs" for solar/net-metering accounts, where Alliant returns no projection
+and a net-export month would otherwise estimate negative. Sensors expose an
+`is_estimated` attribute when the value isn't a direct Alliant figure.
 
 ## Debugging
 
