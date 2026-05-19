@@ -8,6 +8,11 @@ import time
 
 _LOGGER = logging.getLogger(__name__)
 
+# Service type that identifies an electric meter in the GetMeterAndPremise
+# response (``deviceAttribute5``). Only electric meters work with the
+# /UsageAPI/.../Electric endpoints this integration consumes.
+ELECTRIC_SERVICE_TYPE = "ERES"
+
 class AlliantEnergyData:
     """Class to hold the energy data."""
     def __init__(self):
@@ -35,6 +40,78 @@ class AlliantEnergyAuthError(Exception):
     """Exception for authentication errors."""
     pass
 
+class AlliantEnergyMeter:
+    """A single Alliant Energy meter and the account it belongs to."""
+
+    def __init__(
+        self,
+        meter_number: str,
+        account_number: str,
+        premise_number: str,
+        service_type: str | None = None,
+        address: str | None = None,
+    ) -> None:
+        self.meter_number = meter_number
+        self.account_number = account_number
+        self.premise_number = premise_number
+        self.service_type = service_type
+        self.address = address
+
+    @property
+    def label(self) -> str:
+        """Human-readable label used in the config flow meter picker."""
+        parts = [f"Meter {self.meter_number}"]
+        if self.address:
+            parts.append(self.address)
+        parts.append(f"acct {self.account_number}")
+        return " — ".join(parts)
+
+    def to_dict(self) -> dict:
+        """Serialize for storage in the config entry."""
+        return {
+            "meter_number": self.meter_number,
+            "account_number": self.account_number,
+            "premise_number": self.premise_number,
+            "service_type": self.service_type,
+            "address": self.address,
+            "label": self.label,
+        }
+
+    @classmethod
+    def from_dict(cls, data: dict) -> "AlliantEnergyMeter":
+        """Rehydrate from config-entry storage."""
+        return cls(
+            meter_number=data["meter_number"],
+            account_number=data["account_number"],
+            premise_number=data["premise_number"],
+            service_type=data.get("service_type"),
+            address=data.get("address"),
+        )
+
+# Candidate keys that may carry a street address in the addresses/meter
+# payloads. The Alliant backend has changed field names before, so we probe
+# several and fall back gracefully.
+_ADDRESS_KEYS = (
+    "serviceAddress",
+    "premiseAddress",
+    "address",
+    "addressLine1",
+    "fullAddress",
+    "nickName",
+    "nickname",
+)
+
+def _extract_address(*objs: dict) -> str | None:
+    """Pull a human-friendly address out of the first object that has one."""
+    for obj in objs:
+        if not isinstance(obj, dict):
+            continue
+        for key in _ADDRESS_KEYS:
+            value = obj.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
 class AlliantEnergyClient:
     """Client to handle Alliant Energy API interaction."""
 
@@ -47,9 +124,6 @@ class AlliantEnergyClient:
         self._token: Optional[str] = None
         self._refresh_token: Optional[str] = None
         self._token_expires_at: Optional[float] = None
-        self._account_number: Optional[str] = None
-        self._premise_number: Optional[str] = None
-        self._meter_number: Optional[str] = None
         self._session: Optional[aiohttp.ClientSession] = None
         self._uuid: Optional[str] = None
 
@@ -92,12 +166,9 @@ class AlliantEnergyClient:
         self._refresh_token = auth_data.get("refresh_token")
         self._token_expires_at = auth_data.get("expires_at")
         self._uuid = auth_data.get("uuid")
-        self._account_number = auth_data.get("account_number")
-        self._premise_number = auth_data.get("premise_number")
-        self._meter_number = auth_data.get("meter_number")
 
         _LOGGER.debug("Loaded cached authentication data")
-        return bool(self._token and self._meter_number)
+        return bool(self._token and self._uuid)
 
     async def _save_auth_data(self):
         """Save authentication data to cache."""
@@ -109,9 +180,6 @@ class AlliantEnergyClient:
             "refresh_token": self._refresh_token,
             "expires_at": self._token_expires_at,
             "uuid": self._uuid,
-            "account_number": self._account_number,
-            "premise_number": self._premise_number,
-            "meter_number": self._meter_number,
         }
 
         await self._store.async_save(auth_data)
@@ -157,7 +225,6 @@ class AlliantEnergyClient:
             self._token_expires_at = time.time() + (data["data"]["expiresIn"] * 60)
             self._uuid = data["data"]["user"]["uuid"]
 
-            await self._get_account_details()
             await self._save_auth_data()
 
             return self._token
@@ -173,8 +240,8 @@ class AlliantEnergyClient:
             except AlliantEnergyAuthError:
                 await self._get_token(use_refresh_token=False)
 
-    async def _get_account_details(self):
-        """Get account and premise numbers."""
+    async def _get_accounts(self) -> list[dict]:
+        """Return every account/premise tied to the authenticated user."""
         url = f"{self.BASE_URL}/Services/api/1/Addresses/User/{self._uuid}"
 
         headers = {
@@ -190,14 +257,12 @@ class AlliantEnergyClient:
             if not data["data"]:
                 raise AlliantEnergyAuthError("No account found")
 
-            account = data["data"][0]
-            self._account_number = account["accountNumber"]
-            self._premise_number = account["premiseNumber"]
+            return data["data"]
 
-            await self._get_meter_details()
-
-    async def _get_meter_details(self):
-        """Get meter number."""
+    async def _get_meters_for_account(
+        self, account_number: str, premise_number: str
+    ) -> list[dict]:
+        """Return the raw meter list for a single account/premise."""
         url = f"{self.BASE_URL}/Services/api/1/Usages/GetMeterAndPremise"
 
         headers = {
@@ -207,8 +272,8 @@ class AlliantEnergyClient:
         }
 
         payload = {
-            "accountNumber": self._account_number,
-            "premiseNumber": self._premise_number
+            "accountNumber": account_number,
+            "premiseNumber": premise_number,
         }
 
         async with self._session.post(url, json=payload, headers=headers) as response:
@@ -216,21 +281,83 @@ class AlliantEnergyClient:
                 raise AlliantEnergyAuthError("Failed to get meter details")
 
             data = await response.json()
-            if not data["data"]:
-                raise AlliantEnergyAuthError("No meter found")
+            return data.get("data") or []
 
-            meter = next((meter for meter in data["data"] if meter['deviceAttribute5'] == 'ERES'), None)
-            if not meter:
-                raise AlliantEnergyAuthError("No meter found")
+    async def async_get_meters(self) -> list[AlliantEnergyMeter]:
+        """Discover all electric meters across every account on the login.
 
-            self._meter_number = meter["meterNumber"]
-
-    async def async_get_data(self) -> AlliantEnergyData:
-        """Get the energy data."""
+        This replaces the old behaviour of silently picking the first
+        ``ERES`` meter, which broke when a meter was swapped and the retired
+        one stayed visible on the account.
+        """
         if not self._session:
             self._session = aiohttp.ClientSession()
 
         await self._ensure_token()
+
+        meters: list[AlliantEnergyMeter] = []
+        seen: set[tuple[str, str, str]] = set()
+        for account in await self._get_accounts():
+            account_number = account["accountNumber"]
+            premise_number = account["premiseNumber"]
+            raw_meters = await self._get_meters_for_account(
+                account_number, premise_number
+            )
+            _LOGGER.debug(
+                "Account %s premise %s returned %d meter(s): %s",
+                account_number,
+                premise_number,
+                len(raw_meters),
+                json.dumps(raw_meters),
+            )
+
+            for meter in raw_meters:
+                service_type = meter.get("deviceAttribute5")
+                if service_type != ELECTRIC_SERVICE_TYPE:
+                    _LOGGER.debug(
+                        "Skipping non-electric meter %s (service type %s)",
+                        meter.get("meterNumber"),
+                        service_type,
+                    )
+                    continue
+
+                meter_number = meter["meterNumber"]
+                dedupe_key = (account_number, premise_number, meter_number)
+                if dedupe_key in seen:
+                    _LOGGER.debug(
+                        "Skipping duplicate meter %s on account %s premise %s",
+                        meter_number,
+                        account_number,
+                        premise_number,
+                    )
+                    continue
+                seen.add(dedupe_key)
+
+                meters.append(
+                    AlliantEnergyMeter(
+                        meter_number=meter_number,
+                        account_number=account_number,
+                        premise_number=premise_number,
+                        service_type=service_type,
+                        address=_extract_address(meter, account),
+                    )
+                )
+
+        if not meters:
+            raise AlliantEnergyAuthError("No electric meters found")
+
+        return meters
+
+    async def async_get_data(self, meter: AlliantEnergyMeter) -> AlliantEnergyData:
+        """Get the energy data for a single meter."""
+        if not self._session:
+            self._session = aiohttp.ClientSession()
+
+        await self._ensure_token()
+
+        account_number = meter.account_number
+        premise_number = meter.premise_number
+        meter_number = meter.meter_number
 
         today = datetime.now().date()
         first_of_month = today.replace(day=1)
@@ -242,8 +369,8 @@ class AlliantEnergyClient:
         # Get historical data first
         historical_url = f"{self.BASE_URL}/UsageAPI/api/V1/Electric"
         historical_params = {
-            "AccountNumber": f"{self._premise_number}-{self._account_number}",
-            "MeterNumber": self._meter_number,
+            "AccountNumber": f"{premise_number}-{account_number}",
+            "MeterNumber": meter_number,
             "From": today.replace(year=today.year - 1).strftime("%Y-%m-%d"),
             "To": last_of_month.strftime("%Y-%m-%d"),
             "Uom": "kWh",
@@ -316,13 +443,13 @@ class AlliantEnergyClient:
             elif response.status == 401:
                 _LOGGER.error("Authentication failed for historical data. Token may have expired.")
                 await self._get_token()
-                return await self.async_get_data()
+                return await self.async_get_data(meter)
 
         # Get projected data
         projected_url = f"{self.BASE_URL}/UsageAPI/api/V1/ProjectedElectric"
         projected_params = {
-            "AccountNumber": f"{self._premise_number}-{self._account_number}",
-            "MeterNumber": self._meter_number,
+            "AccountNumber": f"{premise_number}-{account_number}",
+            "MeterNumber": meter_number,
             "StartDate": first_of_month.strftime("%Y-%m-%d"),
             "EndDate": last_of_month.strftime("%Y-%m-%d"),
             "Type": "0"

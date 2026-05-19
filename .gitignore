@@ -1,3 +1,6 @@
+# Local validation tool (not for committing)
+check_alliant.py
+
 # Environment and secrets
 .env
 *.pickle

@@ -1,0 +1,43 @@
+{
+  "config": {
+    "step": {
+      "user": {
+        "title": "Alliant Energy",
+        "description": "Enter your Alliant Energy account credentials.",
+        "data": {
+          "username": "Username",
+          "password": "Password"
+        }
+      },
+      "meters": {
+        "title": "Select meters",
+        "description": "Choose which electric meters to import. Retired meters that are still visible on your account can be left unchecked.",
+        "data": {
+          "selected_meters": "Meters to import"
+        }
+      }
+    },
+    "error": {
+      "invalid_auth": "Invalid authentication",
+      "no_meters_selected": "Select at least one meter",
+      "unknown": "Unexpected error"
+    },
+    "abort": {
+      "already_configured": "This account is already configured"
+    }
+  },
+  "options": {
+    "step": {
+      "init": {
+        "title": "Select meters",
+        "description": "Choose which electric meters to import.",
+        "data": {
+          "selected_meters": "Meters to import"
+        }
+      }
+    },
+    "error": {
+      "no_meters_selected": "Select at least one meter"
+    }
+  }
+}

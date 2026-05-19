@@ -6,12 +6,14 @@ This Home Assistant integration gets energy usage and cost data from Alliant Ene
 
 ## Features
 
+- Multi-meter support — pick which meters to import (handy when a retired meter is still on your account)
 - Current billing period usage and cost
 - Forecasted usage and cost
 - Historical usage data
 - Cost per kWh calculations (including customer charge adjustments)
 - Billing period tracking
 - Automatic cost estimation when Alliant data isn't available
+- Reconfigurable meter selection via the integration's **Configure** button
 
 ## Installation
 
@@ -36,6 +38,19 @@ This Home Assistant integration gets energy usage and cost data from Alliant Ene
 1. Go to Settings -> Devices & Services -> Add Integration
 2. Search for "Alliant Energy"
 3. Enter your Alliant Energy credentials
+4. Select which meter(s) to import. All electric meters on the account are
+   pre-selected; uncheck any retired meters you don't want.
+
+To change the selection later, open the integration and click **Configure**.
+
+Each selected meter gets its own device (`Alliant Energy Meter <number>`) with
+the full sensor set below. Sensor entities are namespaced by meter number, so
+adding meters never collides with existing ones.
+
+> **Upgrading from a single-meter version:** entities are now namespaced per
+> meter, so your old `sensor.*` entities become orphaned (their unique IDs
+> changed). Delete the stale entities; history on them cannot be carried over
+> since it belonged to the previously auto-selected meter.
 
 ## Sensors
 

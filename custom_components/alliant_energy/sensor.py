@@ -15,8 +15,8 @@ from homeassistant.helpers.update_coordinator import (
 )
 from homeassistant.util.dt import as_local
 
-from .const import DOMAIN, ELEC_SENSORS, UPDATE_INTERVAL
-from .client import AlliantEnergyClient, AlliantEnergyData
+from .const import DOMAIN, ELEC_SENSORS, AlliantEntityDescription
+from .client import AlliantEnergyData, AlliantEnergyMeter
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -27,95 +27,101 @@ async def async_setup_entry(
 ) -> None:
     """Set up Alliant Energy sensors based on a config entry."""
     data = hass.data[DOMAIN][entry.entry_id]
-    store = data["store"]
-
-    client = AlliantEnergyClient(
-        username=entry.data["username"],
-        password=entry.data["password"],
-        store=store,
-    )
-
-    async def async_update_data() -> AlliantEnergyData:
-        """Fetch data from API endpoint."""
-        return await client.async_get_data()
-
-    coordinator = DataUpdateCoordinator(
-        hass,
-        _LOGGER,
-        name=DOMAIN,
-        update_method=async_update_data,
-        update_interval=timedelta(seconds=UPDATE_INTERVAL),
-    )
-
-    # Fetch initial data so we have data when entities subscribe
-    await coordinator.async_config_entry_first_refresh()
+    coordinator: DataUpdateCoordinator = data["coordinator"]
+    meters: list[AlliantEnergyMeter] = data["meters"]
 
     entities = [
         AlliantEnergySensor(
             coordinator=coordinator,
             entry_id=entry.entry_id,
+            meter=meter,
             description=description,
         )
+        for meter in meters
         for description in ELEC_SENSORS
     ]
 
     async_add_entities(entities)
 
 class AlliantEnergySensor(CoordinatorEntity, SensorEntity):
-    """Representation of an Alliant Energy sensor."""
+    """Representation of an Alliant Energy sensor for a single meter."""
+
+    _attr_has_entity_name = True
 
     def __init__(
         self,
         coordinator: DataUpdateCoordinator,
         entry_id: str,
+        meter: AlliantEnergyMeter,
         description: AlliantEntityDescription,
     ) -> None:
         """Initialize the sensor."""
         super().__init__(coordinator)
 
+        self._meter_number = meter.meter_number
         self.entity_description = description
-        self._attr_unique_id = f"{entry_id}_{description.key}"
+        self._attr_unique_id = f"{entry_id}_{meter.meter_number}_{description.key}"
         self._attr_device_info = {
-            "identifiers": {(DOMAIN, entry_id)},
-            "name": "Alliant Energy",
+            "identifiers": {(DOMAIN, f"{entry_id}_{meter.meter_number}")},
+            "name": f"Alliant Energy Meter {meter.meter_number}",
             "manufacturer": "Alliant Energy",
             "model": "Usage Monitor",
         }
 
     @property
+    def _meter_data(self) -> AlliantEnergyData | None:
+        """Return this meter's slice of the coordinator data."""
+        if not self.coordinator.data:
+            return None
+        return self.coordinator.data.get(self._meter_number)
+
+    @property
+    def available(self) -> bool:
+        """Only available when this meter has data in the latest refresh."""
+        return super().available and self._meter_data is not None
+
+    @property
     def native_value(self) -> Any:
         """Return the state of the sensor."""
-        return self.entity_description.value_fn(self.coordinator.data)
+        meter_data = self._meter_data
+        if meter_data is None:
+            return None
+        return self.entity_description.value_fn(meter_data)
 
     @property
     def extra_state_attributes(self) -> dict[str, Any]:
         """Return additional state attributes."""
-        attributes = {}
+        attributes: dict[str, Any] = {}
+        meter_data = self._meter_data
+        if meter_data is None:
+            return attributes
+
+        attributes["meter_number"] = self._meter_number
 
         # Add last update times if available
-        if self.coordinator.data.last_api_update:
-            attributes["last_api_update"] = as_local(self.coordinator.data.last_api_update).isoformat()
+        if meter_data.last_api_update:
+            attributes["last_api_update"] = as_local(meter_data.last_api_update).isoformat()
 
-        if self.coordinator.data.last_meter_read:
-            attributes["last_meter_read"] = as_local(self.coordinator.data.last_meter_read).isoformat()
+        if meter_data.last_meter_read:
+            attributes["last_meter_read"] = as_local(meter_data.last_meter_read).isoformat()
 
         # Add billing period dates if available
-        if self.coordinator.data.start_date:
-            attributes["billing_period_start"] = as_local(self.coordinator.data.start_date).isoformat()
+        if meter_data.start_date:
+            attributes["billing_period_start"] = as_local(meter_data.start_date).isoformat()
 
-        if self.coordinator.data.end_date:
-            attributes["billing_period_end"] = as_local(self.coordinator.data.end_date).isoformat()
+        if meter_data.end_date:
+            attributes["billing_period_end"] = as_local(meter_data.end_date).isoformat()
 
         # For cost sensors, add estimated flag if applicable
         if self.entity_description.key in ["elec_cost_to_date", "elec_forecasted_cost"]:
-            attributes["is_estimated"] = self.coordinator.data.is_cost_estimated
+            attributes["is_estimated"] = meter_data.is_cost_estimated
 
         # For cost per kWh sensor, add calculation period and customer charge
         if self.entity_description.key == "elec_cost_per_kwh":
-            if self.coordinator.data.last_meter_read:
-                three_months_ago = self.coordinator.data.last_meter_read - timedelta(days=90)
+            if meter_data.last_meter_read:
+                three_months_ago = meter_data.last_meter_read - timedelta(days=90)
                 attributes["calculation_period_start"] = as_local(three_months_ago).isoformat()
-                attributes["calculation_period_end"] = as_local(self.coordinator.data.last_meter_read).isoformat()
-            attributes["customer_charge_per_day"] = self.coordinator.data.customer_charge
+                attributes["calculation_period_end"] = as_local(meter_data.last_meter_read).isoformat()
+            attributes["customer_charge_per_day"] = meter_data.customer_charge
 
         return attributes

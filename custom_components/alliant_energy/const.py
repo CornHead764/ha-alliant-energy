@@ -15,6 +15,12 @@ from homeassistant.const import (
 DOMAIN = "alliant_energy"
 CONF_USERNAME = "username"
 CONF_PASSWORD = "password"
+# Mapping of discovered meters, keyed by meter number, stored on the config
+# entry data so we don't have to re-discover on every restart.
+CONF_METERS = "meters"
+# List of meter numbers the user chose to import. Stored in entry options so
+# it can be changed later via the options flow.
+CONF_SELECTED_METERS = "selected_meters"
 
 # Storage constants
 STORAGE_VERSION = 1
