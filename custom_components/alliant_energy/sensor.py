@@ -1,7 +1,6 @@
 """Support for Alliant Energy sensors."""
 from __future__ import annotations
 
-from datetime import timedelta
 import logging
 from typing import Any
 
@@ -116,12 +115,11 @@ class AlliantEnergySensor(CoordinatorEntity, SensorEntity):
         if self.entity_description.key in ["elec_cost_to_date", "elec_forecasted_cost"]:
             attributes["is_estimated"] = meter_data.is_cost_estimated
 
-        # For cost per kWh sensor, add calculation period and customer charge
+        # For cost per kWh sensor, expose the daily customer charge that is
+        # backed out when deriving the rate. (The rate itself comes from the
+        # most recent billing period with positive net consumption, not a
+        # fixed window, so no calculation_period_* attributes are reported.)
         if self.entity_description.key == "elec_cost_per_kwh":
-            if meter_data.last_meter_read:
-                three_months_ago = meter_data.last_meter_read - timedelta(days=90)
-                attributes["calculation_period_start"] = as_local(three_months_ago).isoformat()
-                attributes["calculation_period_end"] = as_local(meter_data.last_meter_read).isoformat()
             attributes["customer_charge_per_day"] = meter_data.customer_charge
 
         return attributes

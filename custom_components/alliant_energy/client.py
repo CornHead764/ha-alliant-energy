@@ -395,7 +395,7 @@ class AlliantEnergyClient:
         historical_params = {
             "AccountNumber": f"{premise_number}-{account_number}",
             "MeterNumber": meter_number,
-            "From": today.replace(year=today.year - 1).strftime("%Y-%m-%d"),
+            "From": (today - timedelta(days=365)).strftime("%Y-%m-%d"),
             "To": last_of_month.strftime("%Y-%m-%d"),
             "Uom": "kWh",
             "Periodicity": "MO"

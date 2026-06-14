@@ -29,10 +29,10 @@ STORAGE_KEY = f"{DOMAIN}_auth_store"
 # Update interval (in seconds) - 1 hour
 UPDATE_INTERVAL = 3600
 
-@dataclass
+@dataclass(frozen=True, kw_only=True)
 class AlliantEntityDescription(SensorEntityDescription):
     """Class describing Alliant Energy sensor entities."""
-    value_fn: Callable[[Any], Any] = None
+    value_fn: Callable[[Any], Any] | None = None
 
 ELEC_SENSORS = (
     AlliantEntityDescription(
