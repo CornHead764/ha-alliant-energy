@@ -2,11 +2,11 @@
   "domain": "alliant_energy",
   "name": "Alliant Energy",
   "codeowners": [
-    "@detour1999",
-	"@CaramelKat"
+    "@CornHead764"
   ],
   "config_flow": true,
-  "documentation": "https://github.com/CaramelKat/ha-alliant-energy",
+  "documentation": "https://github.com/CornHead764/ha-alliant-energy",
+  "issue_tracker": "https://github.com/CornHead764/ha-alliant-energy/issues",
   "iot_class": "cloud_polling",
   "requirements": [
     "aiohttp"
