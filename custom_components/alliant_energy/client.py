@@ -512,13 +512,21 @@ class AlliantEnergyClient:
                 await self._get_token()
                 return await self.async_get_data(meter)
 
-        # Get projected data
+        # Get projected data. Scope the window to the current billing period
+        # rather than the calendar month, so soFarThisMonthProjectedConsumption
+        # is usage since the bill started (resets on the billing boundary, not
+        # the 1st) and projectedConsumption forecasts the whole bill cycle. Both
+        # StartDate and EndDate must move together: a billing StartDate with a
+        # month-end EndDate truncates the forecast at month-end. Fall back to the
+        # calendar month when the historical call yielded no billing period.
+        proj_start = data.start_date.date() if data.start_date else first_of_month
+        proj_end = data.end_date.date() if data.end_date else last_of_month
         projected_url = f"{self.BASE_URL}/UsageAPI/api/V1/ProjectedElectric"
         projected_params = {
             "AccountNumber": f"{premise_number}-{account_number}",
             "MeterNumber": meter_number,
-            "StartDate": first_of_month.strftime("%Y-%m-%d"),
-            "EndDate": last_of_month.strftime("%Y-%m-%d"),
+            "StartDate": proj_start.strftime("%Y-%m-%d"),
+            "EndDate": proj_end.strftime("%Y-%m-%d"),
             "Type": "0"
         }
 
